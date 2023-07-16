@@ -1,0 +1,21 @@
+{
+  "title": "SunPower",
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "host": "Host",
+          "use_descriptive_names": "Use descriptive entity names"
+        },
+        "description": "If 'Use descriptive entity names' is selected, device names\nwill be prepended on all entity names."
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot Connect",
+      "unknown": "Unkown Error"
+    },
+    "abort": {
+      "already_configured": "Already Configured"
+    }
+  }
+}
