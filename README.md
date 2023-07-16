@@ -8,6 +8,11 @@ Home Assistant SunPower Integration using the local installer ethernet interface
 
 ## Component to integrate with [sunpower][sunpower-us] PVS 5/6 monitors
 
+This is derived from
+[hass-sunpower][https://github.com/krbaker/hass-sunpower] by Keith
+Baker, with customization for the KEBZ Solar installation that has
+multiple consumption sources and no down-stream "to grid".
+
 **This component will set up the following platforms.**
 
 Platform | Description
@@ -18,10 +23,10 @@ Platform | Description
 ## Installation
 1. Click install.
 3. Install HACS
-4. Add this Repo to HACS by going to the 3 dots on the right ...-> Custom repositories -> Rpository: krbaker/hass-sunpower Category: integration
+4. Add this Repo to HACS by going to the 3 dots on the right ...-> Custom repositories -> Repository: kevinkebz/KebzSunPower Category: integration
 5. Install this integration in HACS
 6. Restart Home Assistant
-8. In the Home Assistant UI go to "Configuration" -> "Integrations" click "+" and search for "Sunpower".
+8. In the Home Assistant UI go to "Configuration" -> "Integrations" click "+" and search for "KEBZ Sunpower".
    * The main configuration is IP/Hostname. If setup with a NAT as described below the IP will be 172.27.153.1. Note the network setup is for most people the challenging setup of this integration.
    * Requires that the management LAN interface is plugged in, your installer uses this for setup but doesn't plug it into your lan
    * This network interface has a DHCP server running on it. If you plug it straight into your home network it will make probably other systems stop working as they will DHCP to the wrong address.
@@ -115,8 +120,6 @@ Some people seem to have a browser caching / refresh issue it seems to be solved
 [commits]: https://github.com/krbaker/hass-sunpower/commits/master
 [hacs]: https://github.com/custom-components/hacs
 [hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge
-[maintenance-shield]: https://img.shields.io/badge/maintainer-Keith%20Baker%20%40krbaker-blue.svg?style=for-the-badge
-[releases-shield]: https://img.shields.io/github/release/krbaker/hass-sunpower.svg?style=for-the-badge
-[releases]: https://github.com/krbaker/hass-sunpower/releases
+[releases]: https://github.com/kevinkebz/KebzSunPower/releases
 [sunpower-us]: https://us.sunpower.com/products/solar-panels
 [pi_setup]: https://starreveld.com/PVS6%20Access%20and%20API.pdf
