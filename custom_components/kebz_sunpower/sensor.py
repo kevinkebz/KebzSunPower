@@ -2,6 +2,33 @@
 import logging
 
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .const import DOMAIN
+
+from homeassistant.const import (
+    TIME_SECONDS,
+    DATA_KILOBYTES,
+    FREQUENCY_HERTZ,
+    ENERGY_KILO_WATT_HOUR,
+    POWER_KILO_WATT,
+    POWER_VOLT_AMPERE,
+    PERCENTAGE,
+    ELECTRIC_POTENTIAL_VOLT,
+    ELECTRIC_CURRENT_AMPERE,
+    TEMP_CELSIUS,
+    DEVICE_CLASS_ENERGY,
+    DEVICE_CLASS_POWER,
+    DEVICE_CLASS_VOLTAGE,
+    DEVICE_CLASS_CURRENT,
+    DEVICE_CLASS_TEMPERATURE,
+    DEVICE_CLASS_POWER_FACTOR
+)
+
+from homeassistant.components.sensor import (
+    STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL,
+    STATE_CLASS_TOTAL_INCREASING
+)
 
 from .const import (
     DOMAIN,
@@ -101,6 +128,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     )
                     if sib.native_value is not None: # ensure we can pull a value here, otherwise throw out this value
                         entities.append(sib)
+
+    # Custom calculations for to-grid and to-home.
+    meterToGrid = SunPowerMeterCalculatedToGrid(
+        coordinator
+        )
+
+    entities.append(meterToGrid)
 
     async_add_entities(entities, True)
 
@@ -203,6 +237,86 @@ class SunPowerMeterBasic(SunPowerMeterEntity, SensorEntity):
         """Get the current value"""
         return self.coordinator.data[METER_DEVICE_TYPE][self.base_unique_id].get(self._field, None)
 
+
+class SunPowerMeterCalculatedToGrid(CoordinatorEntity, SensorEntity):
+    """Representation of SunPower Meter Stat"""
+
+    def __init__(self, coordinator):
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+
+    @property
+    def native_value(self):
+
+        _LOGGER.debug("CalculatedToGrid: native_value entry")
+
+        # We want to retrieve two values: the current consumption and the current production.
+        meterData = self.coordinator.data[METER_DEVICE_TYPE]
+
+        _LOGGER.debug("CalculatedToGrid: got data %s", meterData)
+
+        # There are two: consumption and production. Production always comes first.
+        meterAsList = list(meterData)
+        productionDataValues = meterAsList[0]
+        consumptionDataValues = meterAsList[1]
+            
+        _LOGGER.debug("productionDataValues: %s", meterData[productionDataValues])
+        _LOGGER.debug("consumtpionDataValue: %s", meterData[consumptionDataValues])
+
+        consumptionData = meterData[consumptionDataValues]['p_3phsum_kw']
+
+        _LOGGER.debug("Consumption: %f", consumptionData)
+
+        productionData = meterData[productionDataValues]['p_3phsum_kw']
+        
+        _LOGGER.debug("Consumption: %f  Production: %f", consumptionData, productionData)
+
+        if(productionData > consumptionData):
+            return 0.0
+        
+        return consumptionData - productionData
+
+    @property
+    def device_info(self):
+        """Sunpower Meter device info."""
+        device_info = {
+            "identifiers": {(DOMAIN, "CalculatedToGrid")},
+            "name": "CalculatedToGrid",
+            "manufacturer": "SunPower",
+            "model": "PVS6",
+        }
+
+        return device_info
+
+    @property
+    def native_unit_of_measurement(self):
+        """Return the unit of measurement."""
+        return POWER_KILO_WATT
+
+    @property
+    def device_class(self):
+        """Return device class."""
+        return DEVICE_CLASS_POWER
+
+    @property
+    def state_class(self):
+        """Return state class."""
+        return STATE_CLASS_MEASUREMENT
+
+    @property
+    def icon(self):
+        """Icon to use in the frontend, if any."""
+        return "mdi:flash"
+
+    @property
+    def unique_id(self):
+        """Device Uniqueid."""
+        return "GridConsumptionCalculated"
+
+    @property
+    def name(self):
+        """Device Name."""
+        return "Consumption From Grid"
 
 class SunPowerInverterBasic(SunPowerInverterEntity, SensorEntity):
     """Representation of SunPower Meter Stat"""
