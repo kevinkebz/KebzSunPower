@@ -32,7 +32,7 @@ def sunpower_fetch(sunpower_monitor):
     """Basic data fetch routine to get and reformat sunpower data to a dict of device type and serial #"""
     try:
         sunpower_data = sunpower_monitor.device_list()
-        _LOGGER.debug("got data %s", sunpower_data)
+        _LOGGER.debug("sunpower_fetch: got data %s", sunpower_data)
         data = {}
         # Convert data into indexable format data[device_type][serial]
         for device in sunpower_data["devices"]:
