@@ -6,10 +6,12 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
 )
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
     ESS_DEVICE_TYPE,
+    METER_DEVICE_TYPE,
     PVS_DEVICE_TYPE,
     SUNPOWER_COORDINATOR,
     SUNPOWER_DESCRIPTIVE_NAMES,
@@ -17,6 +19,27 @@ from .const import (
     SUNPOWER_SENSORS,
     SUNVAULT_SENSORS,
 )
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorStateClass,
+)
+
+from homeassistant.const import (
+    PERCENTAGE,
+    POWER_VOLT_AMPERE_REACTIVE,
+    EntityCategory,
+    UnitOfApparentPower,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfEnergy,
+    UnitOfFrequency,
+    UnitOfInformation,
+    UnitOfPower,
+    UnitOfTemperature,
+    UnitOfTime,
+)
+
 from .entity import SunPowerEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -242,17 +265,17 @@ class SunPowerMeterCalculatedFromGrid(CoordinatorEntity, SensorEntity):
     @property
     def native_unit_of_measurement(self):
         """Return the unit of measurement."""
-        return POWER_KILO_WATT
+        return UnitOfPower.KILO_WATT
 
     @property
     def device_class(self):
         """Return device class."""
-        return DEVICE_CLASS_POWER
+        return SensorDeviceClass.POWER
 
     @property
     def state_class(self):
         """Return state class."""
-        return STATE_CLASS_MEASUREMENT
+        return SensorStateClass.MEASUREMENT
 
     @property
     def icon(self):
@@ -312,17 +335,17 @@ class SunPowerMeterCalculatedToGrid(CoordinatorEntity, SensorEntity):
     @property
     def native_unit_of_measurement(self):
         """Return the unit of measurement."""
-        return POWER_KILO_WATT
+        return UnitOfPower.KILO_WATT
 
     @property
     def device_class(self):
         """Return device class."""
-        return DEVICE_CLASS_POWER
+        return SensorDeviceClass.POWER
 
     @property
     def state_class(self):
         """Return state class."""
-        return STATE_CLASS_MEASUREMENT
+        return SensorStateClass.MEASUREMENT
 
     @property
     def icon(self):
