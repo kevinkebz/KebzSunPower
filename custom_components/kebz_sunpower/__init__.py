@@ -1,24 +1,43 @@
 """The sunpower integration."""
+
 import asyncio
-from datetime import timedelta
 import logging
 import time
+from datetime import timedelta
 
 import voluptuous as vol
-
-from .sunpower import SunPowerMonitor, ConnectionException, ParseException
-
-from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.config_entries import (
+    SOURCE_IMPORT,
+    ConfigEntry,
+)
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import (
+    BATTERY_DEVICE_TYPE,
+    DEFAULT_SUNPOWER_UPDATE_INTERVAL,
+    DEFAULT_SUNVAULT_UPDATE_INTERVAL,
     DOMAIN,
-    UPDATE_INTERVAL,
-    SUNPOWER_OBJECT,
+    ESS_DEVICE_TYPE,
+    HUBPLUS_DEVICE_TYPE,
+    INVERTER_DEVICE_TYPE,
+    METER_DEVICE_TYPE,
+    PVS_DEVICE_TYPE,
+    SETUP_TIMEOUT_MIN,
     SUNPOWER_COORDINATOR,
     SUNPOWER_HOST,
-    SETUP_TIMEOUT_MIN,
+    SUNPOWER_OBJECT,
+    SUNPOWER_UPDATE_INTERVAL,
+    SUNVAULT_DEVICE_TYPE,
+    SUNVAULT_UPDATE_INTERVAL,
+)
+from .sunpower import (
+    ConnectionException,
+    ParseException,
+    SunPowerMonitor,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -27,22 +46,264 @@ CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})}, extra=vol.ALLOW_EXTRA)
 
 PLATFORMS = ["sensor", "binary_sensor"]
 
+PREVIOUS_PVS_SAMPLE_TIME = 0
+PREVIOUS_PVS_SAMPLE = {}
+PREVIOUS_ESS_SAMPLE_TIME = 0
+PREVIOUS_ESS_SAMPLE = {}
 
-def sunpower_fetch(sunpower_monitor):
-    """Basic data fetch routine to get and reformat sunpower data to a dict of device type and serial #"""
+
+def create_vmeter(data):
+    # Create a virtual 'METER' that uses the sum of inverters
+    kwh = 0.0
+    kw = 0.0
+    amps = 0.0
+    freq = []
+    volts = []
+    state = "working"
+    for _serial, inverter in data.get(INVERTER_DEVICE_TYPE, {}).items():
+        if "STATE" in inverter and inverter["STATE"] != "working":
+            state = inverter["STATE"]
+        kwh += float(inverter.get("ltea_3phsum_kwh", "0"))
+        kw += float(inverter.get("p_mppt1_kw", "0"))
+        amps += float(inverter.get("i_3phsum_a", "0"))
+        if "freq_hz" in inverter:
+            freq.append(float(inverter["freq_hz"]))
+        if "vln_3phavg_v" in inverter:
+            volts.append(float(inverter["vln_3phavg_v"]))
+
+    freq_avg = sum(freq) / len(freq)
+    volts_avg = sum(volts) / len(volts)
+
+    pvs_serial = next(iter(data[PVS_DEVICE_TYPE]))  # only one PVS
+    vmeter_serial = f"{pvs_serial}pv"
+    data.setdefault(METER_DEVICE_TYPE, {})[vmeter_serial] = {
+        "SERIAL": vmeter_serial,
+        "TYPE": "PVS-METER-P",
+        "STATE": state,
+        "MODEL": "Virtual",
+        "DESCR": f"Power Meter {vmeter_serial}",
+        "DEVICE_TYPE": "Power Meter",
+        "interface": "virtual",
+        "SWVER": "1.0",
+        "HWVER": "Virtual",
+        "origin": "virtual",
+        "net_ltea_3phsum_kwh": kwh,
+        "p_3phsum_kw": kw,
+        "freq_hz": freq_avg,
+        "i_a": amps,
+        "v12_v": volts_avg,
+    }
+    return data
+
+
+def convert_sunpower_data(sunpower_data):
+    """Convert PVS data into indexable format data[device_type][serial]"""
+    data = {}
+    for device in sunpower_data["devices"]:
+        data.setdefault(device["DEVICE_TYPE"], {})[device["SERIAL"]] = device
+
+    create_vmeter(data)
+
+    return data
+
+
+def convert_ess_data(ess_data, data):
+    """Do all the gymnastics to Integrate ESS data from its unique data source into the PVS data"""
+    sunvault_amperages = []
+    sunvault_voltages = []
+    sunvault_temperatures = []
+    sunvault_customer_state_of_charges = []
+    sunvault_system_state_of_charges = []
+    sunvault_power = []
+    sunvault_power_inputs = []
+    sunvault_power_outputs = []
+    sunvault_state = "working"
+    for device in ess_data["ess_report"]["battery_status"]:
+        data[BATTERY_DEVICE_TYPE][device["serial_number"]]["battery_amperage"] = device[
+            "battery_amperage"
+        ]["value"]
+        data[BATTERY_DEVICE_TYPE][device["serial_number"]]["battery_voltage"] = device[
+            "battery_voltage"
+        ]["value"]
+        data[BATTERY_DEVICE_TYPE][device["serial_number"]]["customer_state_of_charge"] = device[
+            "customer_state_of_charge"
+        ]["value"]
+        data[BATTERY_DEVICE_TYPE][device["serial_number"]]["system_state_of_charge"] = device[
+            "system_state_of_charge"
+        ]["value"]
+        data[BATTERY_DEVICE_TYPE][device["serial_number"]]["temperature"] = device["temperature"][
+            "value"
+        ]
+        if data[BATTERY_DEVICE_TYPE][device["serial_number"]]["STATE"] != "working":
+            sunvault_state = data[BATTERY_DEVICE_TYPE][device["serial_number"]]["STATE"]
+        sunvault_amperages.append(device["battery_amperage"]["value"])
+        sunvault_voltages.append(device["battery_voltage"]["value"])
+        sunvault_temperatures.append(device["temperature"]["value"])
+        sunvault_customer_state_of_charges.append(
+            device["customer_state_of_charge"]["value"],
+        )
+        sunvault_system_state_of_charges.append(device["system_state_of_charge"]["value"])
+        sunvault_power.append(sunvault_amperages[-1] * sunvault_voltages[-1])
+        if sunvault_amperages[-1] < 0:
+            sunvault_power_outputs.append(
+                abs(sunvault_amperages[-1] * sunvault_voltages[-1]),
+            )
+            sunvault_power_inputs.append(0)
+        elif sunvault_amperages[-1] > 0:
+            sunvault_power_inputs.append(sunvault_amperages[-1] * sunvault_voltages[-1])
+            sunvault_power_outputs.append(0)
+        else:
+            sunvault_power_inputs.append(0)
+            sunvault_power_outputs.append(0)
+    for device in ess_data["ess_report"]["ess_status"]:
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["enclosure_humidity"] = device[
+            "enclosure_humidity"
+        ]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["enclosure_temperature"] = device[
+            "enclosure_temperature"
+        ]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["agg_power"] = device["ess_meter_reading"][
+            "agg_power"
+        ]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["meter_a_current"] = device[
+            "ess_meter_reading"
+        ]["meter_a"]["reading"]["current"]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["meter_a_power"] = device[
+            "ess_meter_reading"
+        ]["meter_a"]["reading"]["power"]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["meter_a_voltage"] = device[
+            "ess_meter_reading"
+        ]["meter_a"]["reading"]["voltage"]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["meter_b_current"] = device[
+            "ess_meter_reading"
+        ]["meter_b"]["reading"]["current"]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["meter_b_power"] = device[
+            "ess_meter_reading"
+        ]["meter_b"]["reading"]["power"]["value"]
+        data[ESS_DEVICE_TYPE][device["serial_number"]]["meter_b_voltage"] = device[
+            "ess_meter_reading"
+        ]["meter_b"]["reading"]["voltage"]["value"]
+    if True:
+        device = ess_data["ess_report"]["hub_plus_status"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["contactor_position"] = device[
+            "contactor_position"
+        ]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["grid_frequency_state"] = device[
+            "grid_frequency_state"
+        ]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["grid_phase1_voltage"] = device[
+            "grid_phase1_voltage"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["grid_phase2_voltage"] = device[
+            "grid_phase2_voltage"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["grid_voltage_state"] = device[
+            "grid_voltage_state"
+        ]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["hub_humidity"] = device[
+            "hub_humidity"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["hub_temperature"] = device[
+            "hub_temperature"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["inverter_connection_voltage"] = device[
+            "inverter_connection_voltage"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["load_frequency_state"] = device[
+            "load_frequency_state"
+        ]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["load_phase1_voltage"] = device[
+            "load_phase1_voltage"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["load_phase2_voltage"] = device[
+            "load_phase2_voltage"
+        ]["value"]
+        data[HUBPLUS_DEVICE_TYPE][device["serial_number"]]["main_voltage"] = device[
+            "main_voltage"
+        ]["value"]
+    if True:
+        # Generate a usable serial number for this virtual device, use PVS serial as base
+        # since we must be talking through one and it has a serial
+        pvs_serial = next(iter(data[PVS_DEVICE_TYPE]))  # only one PVS
+        sunvault_serial = f"sunvault_{pvs_serial}"
+        data[SUNVAULT_DEVICE_TYPE] = {sunvault_serial: {}}
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_amperage"] = sum(
+            sunvault_amperages,
+        )
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_voltage"] = sum(
+            sunvault_voltages,
+        ) / len(sunvault_voltages)
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_temperature"] = sum(
+            sunvault_temperatures,
+        ) / len(sunvault_temperatures)
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_customer_state_of_charge"] = sum(
+            sunvault_customer_state_of_charges,
+        ) / len(sunvault_customer_state_of_charges)
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_system_state_of_charge"] = sum(
+            sunvault_system_state_of_charges,
+        ) / len(sunvault_system_state_of_charges)
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_power_input"] = sum(
+            sunvault_power_inputs,
+        )
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_power_output"] = sum(
+            sunvault_power_outputs,
+        )
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["sunvault_power"] = sum(sunvault_power)
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["STATE"] = sunvault_state
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["SERIAL"] = sunvault_serial
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["SWVER"] = "1.0"
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["HWVER"] = "Virtual"
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["DESCR"] = "Virtual SunVault"
+        data[SUNVAULT_DEVICE_TYPE][sunvault_serial]["MODEL"] = "Virtual SunVault"
+    return data
+
+
+def sunpower_fetch(
+    sunpower_monitor,
+    sunpower_update_invertal,
+    sunvault_update_invertal,
+):
+    """Basic data fetch routine to get and reformat sunpower data to a dict of device
+    type and serial #"""
+    global PREVIOUS_PVS_SAMPLE_TIME
+    global PREVIOUS_PVS_SAMPLE
+    global PREVIOUS_ESS_SAMPLE_TIME
+    global PREVIOUS_ESS_SAMPLE
+
+    sunpower_data = PREVIOUS_PVS_SAMPLE
+    ess_data = PREVIOUS_ESS_SAMPLE
+    use_ess = False
+    data = None
+
     try:
-        sunpower_data = sunpower_monitor.device_list()
-        _LOGGER.debug("sunpower_fetch: got data %s", sunpower_data)
-        data = {}
-        # Convert data into indexable format data[device_type][serial]
-        for device in sunpower_data["devices"]:
-            if device["DEVICE_TYPE"] not in data:
-                data[device["DEVICE_TYPE"]] = {device["SERIAL"]: device}
-            else:
-                data[device["DEVICE_TYPE"]][device["SERIAL"]] = device
-        return data
-    except ConnectionException as error:
+        if (time.time() - PREVIOUS_PVS_SAMPLE_TIME) >= (sunpower_update_invertal - 1):
+            PREVIOUS_PVS_SAMPLE_TIME = time.time()
+            sunpower_data = sunpower_monitor.device_list()
+            PREVIOUS_PVS_SAMPLE = sunpower_data
+            _LOGGER.debug("got PVS data %s", sunpower_data)
+    except (ParseException, ConnectionException) as error:
         raise UpdateFailed from error
+
+    data = convert_sunpower_data(sunpower_data)
+    if ESS_DEVICE_TYPE in data:  # Look for an ESS in PVS data
+        use_ess = True
+
+    try:
+        if use_ess and (time.time() - PREVIOUS_ESS_SAMPLE_TIME) >= (sunvault_update_invertal - 1):
+            PREVIOUS_ESS_SAMPLE_TIME = time.time()
+            ess_data = sunpower_monitor.energy_storage_system_status()
+            PREVIOUS_ESS_SAMPLE = ess_data
+            _LOGGER.debug("got ESS data %s", ess_data)
+    except (ParseException, ConnectionException) as error:
+        raise UpdateFailed from error
+
+    try:
+        if use_ess:
+            convert_ess_data(
+                ess_data,
+                data,
+            )  # ess converter appends to items in existing PVS structure
+        return data
     except ParseException as error:
         raise UpdateFailed from error
 
@@ -60,29 +321,56 @@ async def async_setup(hass: HomeAssistant, config: dict):
             DOMAIN,
             context={"source": SOURCE_IMPORT},
             data=conf,
-        )
+        ),
     )
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up sunpower from a config entry."""
+    _LOGGER.debug(f"Setting up {entry.entry_id}, Options {entry.options}, Config {entry.data}")
     entry_id = entry.entry_id
 
     hass.data[DOMAIN].setdefault(entry_id, {})
     sunpower_monitor = SunPowerMonitor(entry.data[SUNPOWER_HOST])
+    sunpower_update_invertal = entry.options.get(
+        SUNPOWER_UPDATE_INTERVAL,
+        DEFAULT_SUNPOWER_UPDATE_INTERVAL,
+    )
+    sunvault_update_invertal = entry.options.get(
+        SUNVAULT_UPDATE_INTERVAL,
+        DEFAULT_SUNVAULT_UPDATE_INTERVAL,
+    )
 
     async def async_update_data():
         """Fetch data from API endpoint, used by coordinator to get mass data updates"""
         _LOGGER.debug("Updating SunPower data")
-        return await hass.async_add_executor_job(sunpower_fetch, sunpower_monitor)
+        return await hass.async_add_executor_job(
+            sunpower_fetch,
+            sunpower_monitor,
+            sunpower_update_invertal,
+            sunvault_update_invertal,
+        )
+
+    # This could be better, taking the shortest time interval as the coordinator update is fine
+    # if the long interval is an even multiple of the short or *much* smaller
+    coordinator_interval = (
+        sunvault_update_invertal
+        if sunvault_update_invertal < sunpower_update_invertal
+        else sunpower_update_invertal
+    )
+
+    _LOGGER.debug(
+        f"Intervals: Sunpower {sunpower_update_invertal} Sunvault {sunvault_update_invertal}",
+    )
+    _LOGGER.debug(f"Coordinator update interval set to {coordinator_interval}")
 
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
         name="SunPower PVS",
         update_method=async_update_data,
-        update_interval=timedelta(seconds=UPDATE_INTERVAL),
+        update_interval=timedelta(seconds=coordinator_interval),
     )
 
     hass.data[DOMAIN][entry.entry_id] = {
@@ -101,10 +389,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     for component in PLATFORMS:
         hass.async_create_task(
-            hass.config_entries.async_forward_entry_setup(entry, component)
+            hass.config_entries.async_forward_entry_setup(entry, component),
         )
 
+    entry.async_on_unload(entry.add_update_listener(update_listener))
+
     return True
+
+
+async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Update listener."""
+    _LOGGER.debug(
+        "Updating: %s with data=%s and options=%s",
+        entry.entry_id,
+        entry.data,
+        entry.options,
+    )
+    _LOGGER.debug("Update listener called, reloading")
+    await hass.config_entries.async_reload(entry.entry_id)
+    _LOGGER.debug("Update listener done reloading")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -114,8 +417,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
             *[
                 hass.config_entries.async_forward_entry_unload(entry, component)
                 for component in PLATFORMS
-            ]
-        )
+            ],
+        ),
     )
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
