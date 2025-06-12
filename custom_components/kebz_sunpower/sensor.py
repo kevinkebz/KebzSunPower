@@ -27,7 +27,6 @@ from homeassistant.components.sensor import (
 
 from homeassistant.const import (
     PERCENTAGE,
-    POWER_VOLT_AMPERE_REACTIVE,
     EntityCategory,
     UnitOfApparentPower,
     UnitOfElectricCurrent,
@@ -36,6 +35,7 @@ from homeassistant.const import (
     UnitOfFrequency,
     UnitOfInformation,
     UnitOfPower,
+    UnitOfReactivePower,
     UnitOfTemperature,
     UnitOfTime,
 )
